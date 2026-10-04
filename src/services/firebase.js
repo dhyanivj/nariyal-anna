@@ -42,6 +42,14 @@ export const app = getApps().length > 0 ? getApp() : initializeApp(firebaseConfi
 export const db = getFirestore(app);
 export const storage = getStorage(app);
 
+// Configure storage retry limits so network operations fail fast (under 3.5s) instead of hanging 10 minutes
+try {
+  storage.maxUploadRetryTime = 3000;
+  storage.maxOperationRetryTime = 3000;
+} catch (e) {
+  // Ignore in case property is read-only in certain SDK builds
+}
+
 // Firestore Collection References
 export const PRODUCTS_COLLECTION = 'products';
 export const CATEGORIES_COLLECTION = 'categories';
@@ -50,10 +58,10 @@ export const SETTINGS_COLLECTION = 'settings';
 export const SECURITY_COLLECTION = 'security';
 
 /**
- * Upload an image file or DataURL directly to Firebase Cloud Storage
+ * Upload an image file or DataURL directly to Firebase Cloud Storage with fast fallback
  * @param {File|Blob|string} imageFileOrDataUrl 
  * @param {string} folder 
- * @returns {Promise<string>} Download URL from Firebase Storage
+ * @returns {Promise<string>} Download URL from Firebase Storage or optimized DataURL
  */
 export async function uploadImageToStorage(imageFileOrDataUrl, folder = 'images') {
   if (!imageFileOrDataUrl) return '';
@@ -67,18 +75,27 @@ export async function uploadImageToStorage(imageFileOrDataUrl, folder = 'images'
   const fileRef = storageRef(storage, `${folder}/${fileName}`);
 
   try {
-    if (typeof imageFileOrDataUrl === 'string' && imageFileOrDataUrl.startsWith('data:')) {
-      // Base64 Data URL upload
-      await uploadString(fileRef, imageFileOrDataUrl, 'data_url');
-    } else {
-      // File or Blob upload
-      await uploadBytes(fileRef, imageFileOrDataUrl);
-    }
-    const downloadUrl = await getDownloadURL(fileRef);
+    const uploadTask = (async () => {
+      if (typeof imageFileOrDataUrl === 'string' && imageFileOrDataUrl.startsWith('data:')) {
+        // Base64 Data URL upload
+        await uploadString(fileRef, imageFileOrDataUrl, 'data_url');
+      } else {
+        // File or Blob upload
+        await uploadBytes(fileRef, imageFileOrDataUrl);
+      }
+      return await getDownloadURL(fileRef);
+    })();
+
+    // 3.5s timeout prevents hanging if storage bucket is not activated in Firebase console
+    const timeoutPromise = new Promise((_, reject) => {
+      setTimeout(() => reject(new Error("Storage upload timed out")), 3500);
+    });
+
+    const downloadUrl = await Promise.race([uploadTask, timeoutPromise]);
     return downloadUrl;
   } catch (error) {
-    console.error("Firebase Storage Upload Error:", error);
-    // Fallback to original string if upload fails
+    console.warn("Firebase Storage unavailable or timed out; falling back to optimized image data:", error?.message || error);
+    // Fallback to original string if upload fails or is not enabled
     return typeof imageFileOrDataUrl === 'string' ? imageFileOrDataUrl : '';
   }
 }

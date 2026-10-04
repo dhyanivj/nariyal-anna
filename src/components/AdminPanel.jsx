@@ -4,7 +4,7 @@ import {
   Settings, Image as ImageIcon, ShoppingBag, 
   BarChart3, RefreshCw, Power, Save, Eye, EyeOff, Sparkles,
   Lock, ArrowLeft, Globe, Search, ExternalLink, X, Package, ShieldCheck,
-  Camera, Upload, LayoutGrid
+  Camera, Upload, LayoutGrid, Loader2
 } from 'lucide-react';
 import logoImg from '../assets/yadav-nariyal-pani-logo.png';
 import { resetToDefaults } from '../services/storageService';
@@ -107,6 +107,10 @@ const adminDictionary = {
     orPasteUrl: "Or paste image URL (https://...)",
     photoPrompt: "Take a photo or pick from gallery",
     removePhoto: "✕ Remove",
+    uploadingImg: "Uploading & compressing photo...",
+    uploadingSub: "Optimizing for ultra-fast store loading...",
+    uploading: "Uploading...",
+    uploadSuccess: "✓ Photo ready!",
     productNameEn: "Product Name (English) *",
     productNameHi: "Product Name (Hindi)",
     priceEn: "Price (₹) *",
@@ -234,6 +238,10 @@ const adminDictionary = {
     orPasteUrl: "या फोटो का लिंक डालें (https://...)",
     photoPrompt: "फोटो खींचें या गैलरी से चुनें",
     removePhoto: "✕ हटाएं",
+    uploadingImg: "फोटो अपलोड व प्रोसेस हो रही है...",
+    uploadingSub: "तेज़ लोडिंग के लिए फोटो तैयार हो रही है...",
+    uploading: "अपलोड हो रहा है...",
+    uploadSuccess: "✓ फोटो तैयार है!",
     productNameEn: "सामान का नाम (अंग्रेज़ी) *",
     productNameHi: "सामान का नाम (हिंदी)",
     priceEn: "बिक्री मूल्य (₹) *",
@@ -320,6 +328,8 @@ export default function AdminPanel({
   // Uploading state indicators for Firebase Storage
   const [isUploadingProductImg, setIsUploadingProductImg] = useState(false);
   const [isUploadingBannerImg, setIsUploadingBannerImg] = useState(false);
+  const [productUploadSuccess, setProductUploadSuccess] = useState(false);
+  const [bannerUploadSuccess, setBannerUploadSuccess] = useState(false);
 
   // Temporary state for settings
   const [tempSettings, setTempSettings] = useState({ 
@@ -359,46 +369,96 @@ export default function AdminPanel({
   const galleryInputRef = useRef(null);
   const cameraInputRef = useRef(null);
 
-  // Compress & upload image file directly to Firebase Cloud Storage
+  // Compress & upload image file directly to Firebase Cloud Storage (or fast optimized fallback)
   const handleImageFile = (file) => {
     if (!file) return;
+
+    if (!file.type || !file.type.startsWith('image/')) {
+      alert("Please select a valid image file (JPG, PNG, WebP).");
+      return;
+    }
+
+    if (file.size > 20 * 1024 * 1024) {
+      alert("Selected photo is too large (over 20MB). Please select a smaller photo.");
+      return;
+    }
+
     setIsUploadingProductImg(true);
+    setProductUploadSuccess(false);
+
+    // Fail-safe timer prevents interface from locking up if decoding hangs
+    const safetyTimer = setTimeout(() => {
+      setIsUploadingProductImg(false);
+    }, 9000);
+
     const reader = new FileReader();
+
+    reader.onerror = (err) => {
+      console.error("FileReader error:", err);
+      clearTimeout(safetyTimer);
+      setIsUploadingProductImg(false);
+      alert("Could not read image file. Please try another photo.");
+    };
+
     reader.onload = (event) => {
       const img = new Image();
-      img.onload = async () => {
-        const canvas = document.createElement('canvas');
-        const maxDim = 800; // Optimal 800px max dimension
-        let width = img.width;
-        let height = img.height;
-        if (width > height) {
-          if (width > maxDim) {
-            height = Math.round((height * maxDim) / width);
-            width = maxDim;
-          }
-        } else {
-          if (height > maxDim) {
-            width = Math.round((width * maxDim) / height);
-            height = maxDim;
-          }
-        }
-        canvas.width = width;
-        canvas.height = height;
-        const ctx = canvas.getContext('2d');
-        ctx.drawImage(img, 0, 0, width, height);
-        const dataUrl = canvas.toDataURL('image/jpeg', 0.82);
 
+      img.onerror = (err) => {
+        console.error("Image decode error:", err);
+        clearTimeout(safetyTimer);
+        setIsUploadingProductImg(false);
+        alert("Could not load image format. Please try a standard JPG or PNG photo.");
+      };
+
+      img.onload = async () => {
         try {
-          if (uploadImageToStorage) {
-            const firebaseUrl = await uploadImageToStorage(dataUrl, 'products');
-            setProductForm(prev => ({ ...prev, image: firebaseUrl || dataUrl }));
+          const canvas = document.createElement('canvas');
+          const maxDim = 720; // 720px is optimal for crisp display and fast Firestore & local storage
+          let width = img.width;
+          let height = img.height;
+          if (width > height) {
+            if (width > maxDim) {
+              height = Math.round((height * maxDim) / width);
+              width = maxDim;
+            }
           } else {
-            setProductForm(prev => ({ ...prev, image: dataUrl }));
+            if (height > maxDim) {
+              width = Math.round((width * maxDim) / height);
+              height = maxDim;
+            }
           }
+          canvas.width = width;
+          canvas.height = height;
+          const ctx = canvas.getContext('2d');
+          if (ctx) {
+            ctx.imageSmoothingEnabled = true;
+            ctx.imageSmoothingQuality = 'high';
+            ctx.drawImage(img, 0, 0, width, height);
+          }
+          const dataUrl = canvas.toDataURL('image/jpeg', 0.80);
+
+          let finalImageUrl = dataUrl;
+          if (uploadImageToStorage) {
+            try {
+              const firebaseUrl = await uploadImageToStorage(dataUrl, 'products');
+              if (firebaseUrl) finalImageUrl = firebaseUrl;
+            } catch (storageErr) {
+              console.warn("Storage upload failed, using optimized image data:", storageErr);
+            }
+          }
+
+          setProductForm(prev => ({ ...prev, image: finalImageUrl }));
+          setProductUploadSuccess(true);
+          setTimeout(() => setProductUploadSuccess(false), 3500);
         } catch (err) {
           console.error("Storage upload error:", err);
-          setProductForm(prev => ({ ...prev, image: dataUrl }));
+          if (event.target?.result) {
+            setProductForm(prev => ({ ...prev, image: event.target.result }));
+            setProductUploadSuccess(true);
+            setTimeout(() => setProductUploadSuccess(false), 3500);
+          }
         } finally {
+          clearTimeout(safetyTimer);
           setIsUploadingProductImg(false);
         }
       };
@@ -519,43 +579,92 @@ export default function AdminPanel({
 
   const handleBannerImageFile = (file) => {
     if (!file) return;
+
+    if (!file.type || !file.type.startsWith('image/')) {
+      alert("Please select a valid image file (JPG, PNG, WebP).");
+      return;
+    }
+
+    if (file.size > 20 * 1024 * 1024) {
+      alert("Selected photo is too large (over 20MB). Please select a smaller photo.");
+      return;
+    }
+
     setIsUploadingBannerImg(true);
+    setBannerUploadSuccess(false);
+
+    const safetyTimer = setTimeout(() => {
+      setIsUploadingBannerImg(false);
+    }, 9000);
+
     const reader = new FileReader();
+
+    reader.onerror = (err) => {
+      console.error("Banner FileReader error:", err);
+      clearTimeout(safetyTimer);
+      setIsUploadingBannerImg(false);
+      alert("Could not read banner image file. Please try another photo.");
+    };
+
     reader.onload = (event) => {
       const img = new Image();
-      img.onload = async () => {
-        const canvas = document.createElement('canvas');
-        const maxDim = 900;
-        let width = img.width;
-        let height = img.height;
-        if (width > height) {
-          if (width > maxDim) {
-            height = Math.round((height * maxDim) / width);
-            width = maxDim;
-          }
-        } else {
-          if (height > maxDim) {
-            width = Math.round((width * maxDim) / height);
-            height = maxDim;
-          }
-        }
-        canvas.width = width;
-        canvas.height = height;
-        const ctx = canvas.getContext('2d');
-        ctx.drawImage(img, 0, 0, width, height);
-        const dataUrl = canvas.toDataURL('image/jpeg', 0.85);
 
+      img.onerror = (err) => {
+        console.error("Banner Image load error:", err);
+        clearTimeout(safetyTimer);
+        setIsUploadingBannerImg(false);
+        alert("Could not load banner image. Please select a JPG or PNG photo.");
+      };
+
+      img.onload = async () => {
         try {
-          if (uploadImageToStorage) {
-            const firebaseUrl = await uploadImageToStorage(dataUrl, 'banners');
-            setBannerForm(prev => ({ ...prev, image: firebaseUrl || dataUrl }));
+          const canvas = document.createElement('canvas');
+          const maxDim = 900;
+          let width = img.width;
+          let height = img.height;
+          if (width > height) {
+            if (width > maxDim) {
+              height = Math.round((height * maxDim) / width);
+              width = maxDim;
+            }
           } else {
-            setBannerForm(prev => ({ ...prev, image: dataUrl }));
+            if (height > maxDim) {
+              width = Math.round((width * maxDim) / height);
+              height = maxDim;
+            }
           }
+          canvas.width = width;
+          canvas.height = height;
+          const ctx = canvas.getContext('2d');
+          if (ctx) {
+            ctx.imageSmoothingEnabled = true;
+            ctx.imageSmoothingQuality = 'high';
+            ctx.drawImage(img, 0, 0, width, height);
+          }
+          const dataUrl = canvas.toDataURL('image/jpeg', 0.82);
+
+          let finalImageUrl = dataUrl;
+          if (uploadImageToStorage) {
+            try {
+              const firebaseUrl = await uploadImageToStorage(dataUrl, 'banners');
+              if (firebaseUrl) finalImageUrl = firebaseUrl;
+            } catch (storageErr) {
+              console.warn("Banner storage upload failed, using optimized image data:", storageErr);
+            }
+          }
+
+          setBannerForm(prev => ({ ...prev, image: finalImageUrl }));
+          setBannerUploadSuccess(true);
+          setTimeout(() => setBannerUploadSuccess(false), 3500);
         } catch (err) {
           console.error("Banner storage upload error:", err);
-          setBannerForm(prev => ({ ...prev, image: dataUrl }));
+          if (event.target?.result) {
+            setBannerForm(prev => ({ ...prev, image: event.target.result }));
+            setBannerUploadSuccess(true);
+            setTimeout(() => setBannerUploadSuccess(false), 3500);
+          }
         } finally {
+          clearTimeout(safetyTimer);
           setIsUploadingBannerImg(false);
         }
       };
@@ -1774,7 +1883,34 @@ export default function AdminPanel({
                 </div>
 
                 {/* Live Preview Box */}
-                {productForm.image ? (
+                {isUploadingProductImg ? (
+                  <div className="upload-loading-box" style={{
+                    width: '100%',
+                    height: '140px',
+                    borderRadius: 'var(--radius-sm)',
+                    overflow: 'hidden',
+                    background: 'linear-gradient(135deg, #F0FDF4 0%, #ECFDF5 100%)',
+                    border: '2px solid #86EFAC',
+                    marginBottom: '10px',
+                    display: 'flex',
+                    flexDirection: 'column',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    gap: '8px',
+                    padding: '12px'
+                  }}>
+                    <Loader2 size={32} className="spin-animation" color="#16A34A" />
+                    <div style={{ textAlign: 'center' }}>
+                      <div style={{ fontSize: '13px', fontWeight: 800, color: '#15803D' }}>
+                        {at.uploadingImg}
+                      </div>
+                      <div style={{ fontSize: '11px', color: '#166534', marginTop: '2px' }}>
+                        {at.uploadingSub}
+                      </div>
+                    </div>
+                    <div className="upload-progress-bar" />
+                  </div>
+                ) : productForm.image ? (
                   <div style={{
                     width: '100%',
                     height: '140px',
@@ -1785,13 +1921,36 @@ export default function AdminPanel({
                     marginBottom: '10px',
                     display: 'flex',
                     alignItems: 'center',
-                    justifyContent: 'center'
+                    justifyContent: 'center',
+                    position: 'relative'
                   }}>
                     <img 
                       src={productForm.image} 
                       alt="Product Preview" 
                       style={{ width: '100%', height: '100%', objectFit: 'contain' }}
                     />
+                    {productUploadSuccess && (
+                      <div style={{
+                        position: 'absolute',
+                        bottom: '8px',
+                        left: '50%',
+                        transform: 'translateX(-50%)',
+                        background: 'rgba(22, 163, 74, 0.94)',
+                        color: '#FFFFFF',
+                        padding: '4px 12px',
+                        borderRadius: '999px',
+                        fontSize: '11px',
+                        fontWeight: 700,
+                        backdropFilter: 'blur(4px)',
+                        boxShadow: '0 2px 8px rgba(0,0,0,0.2)',
+                        display: 'flex',
+                        alignItems: 'center',
+                        gap: '5px'
+                      }}>
+                        <CheckCircle2 size={13} />
+                        <span>{at.uploadSuccess}</span>
+                      </div>
+                    )}
                   </div>
                 ) : (
                   <div style={{
@@ -1835,8 +1994,8 @@ export default function AdminPanel({
                       opacity: isUploadingProductImg ? 0.7 : 1
                     }}
                   >
-                    <Camera size={16} />
-                    <span>{isUploadingProductImg ? "Uploading..." : at.clickPhoto}</span>
+                    {isUploadingProductImg ? <Loader2 size={16} className="spin-animation" /> : <Camera size={16} />}
+                    <span>{isUploadingProductImg ? at.uploading : at.clickPhoto}</span>
                   </button>
 
                   <button
@@ -1859,8 +2018,8 @@ export default function AdminPanel({
                       opacity: isUploadingProductImg ? 0.7 : 1
                     }}
                   >
-                    <Upload size={16} />
-                    <span>{isUploadingProductImg ? "Uploading..." : at.fromGallery}</span>
+                    {isUploadingProductImg ? <Loader2 size={16} className="spin-animation" /> : <Upload size={16} />}
+                    <span>{isUploadingProductImg ? at.uploading : at.fromGallery}</span>
                   </button>
                 </div>
 
@@ -1875,6 +2034,7 @@ export default function AdminPanel({
                     if (e.target.files && e.target.files[0]) {
                       handleImageFile(e.target.files[0]);
                     }
+                    e.target.value = '';
                   }}
                 />
                 <input
@@ -1886,6 +2046,7 @@ export default function AdminPanel({
                     if (e.target.files && e.target.files[0]) {
                       handleImageFile(e.target.files[0]);
                     }
+                    e.target.value = '';
                   }}
                 />
 
@@ -1895,7 +2056,7 @@ export default function AdminPanel({
                   className="form-input" 
                   value={productForm.image.startsWith('data:') ? '' : productForm.image}
                   onChange={(e) => setProductForm({ ...productForm, image: e.target.value })}
-                  placeholder={at.orPasteUrl}
+                  placeholder={productForm.image.startsWith('data:') ? "✓ Image uploaded (or paste URL to replace)" : at.orPasteUrl}
                   style={{ fontSize: '12px', padding: '7px 10px' }}
                 />
               </div>
@@ -2008,10 +2169,25 @@ export default function AdminPanel({
               <div style={{ display: 'flex', gap: '12px', marginTop: '20px' }}>
                 <button
                   type="submit"
+                  disabled={isUploadingProductImg}
                   className="admin-btn-primary"
-                  style={{ flex: 1, padding: '12px', justifyContent: 'center', fontSize: '14px' }}
+                  style={{ 
+                    flex: 1, 
+                    padding: '12px', 
+                    justifyContent: 'center', 
+                    fontSize: '14px',
+                    opacity: isUploadingProductImg ? 0.65 : 1,
+                    cursor: isUploadingProductImg ? 'not-allowed' : 'pointer'
+                  }}
                 >
-                  {at.saveProductBtn}
+                  {isUploadingProductImg ? (
+                    <>
+                      <Loader2 size={16} className="spin-animation" style={{ marginRight: '6px' }} />
+                      <span>{at.uploadingImg}</span>
+                    </>
+                  ) : (
+                    at.saveProductBtn
+                  )}
                 </button>
                 <button
                   type="button"
@@ -2199,7 +2375,34 @@ export default function AdminPanel({
               <div className="form-group" style={{ marginBottom: '16px' }}>
                 <label className="form-label">{at.bannerImage}</label>
 
-                {bannerForm.image ? (
+                {isUploadingBannerImg ? (
+                  <div className="upload-loading-box" style={{
+                    width: '100%',
+                    height: '140px',
+                    borderRadius: '10px',
+                    overflow: 'hidden',
+                    background: 'linear-gradient(135deg, #F0FDF4 0%, #ECFDF5 100%)',
+                    border: '2px solid #86EFAC',
+                    marginBottom: '10px',
+                    display: 'flex',
+                    flexDirection: 'column',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    gap: '8px',
+                    padding: '12px'
+                  }}>
+                    <Loader2 size={32} className="spin-animation" color="#16A34A" />
+                    <div style={{ textAlign: 'center' }}>
+                      <div style={{ fontSize: '13px', fontWeight: 800, color: '#15803D' }}>
+                        {at.uploadingImg}
+                      </div>
+                      <div style={{ fontSize: '11px', color: '#166534', marginTop: '2px' }}>
+                        {at.uploadingSub}
+                      </div>
+                    </div>
+                    <div className="upload-progress-bar" />
+                  </div>
+                ) : bannerForm.image ? (
                   <div style={{ position: 'relative', borderRadius: '10px', overflow: 'hidden', border: '1.5px solid var(--border-light)', marginBottom: '8px' }}>
                     <img 
                       src={bannerForm.image} 
@@ -2225,6 +2428,29 @@ export default function AdminPanel({
                     >
                       {at.removePhoto}
                     </button>
+                    {bannerUploadSuccess && (
+                      <div style={{
+                        position: 'absolute',
+                        bottom: '8px',
+                        left: '50%',
+                        transform: 'translateX(-50%)',
+                        background: 'rgba(220, 38, 38, 0.9)',
+                        background: 'rgba(22, 163, 74, 0.94)',
+                        color: '#FFFFFF',
+                        padding: '4px 12px',
+                        borderRadius: '999px',
+                        fontSize: '11px',
+                        fontWeight: 700,
+                        backdropFilter: 'blur(4px)',
+                        boxShadow: '0 2px 8px rgba(0,0,0,0.2)',
+                        display: 'flex',
+                        alignItems: 'center',
+                        gap: '5px'
+                      }}>
+                        <CheckCircle2 size={13} />
+                        <span>{at.uploadSuccess}</span>
+                      </div>
+                    )}
                   </div>
                 ) : (
                   <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '8px', marginBottom: '8px' }}>
@@ -2248,8 +2474,8 @@ export default function AdminPanel({
                         opacity: isUploadingBannerImg ? 0.7 : 1
                       }}
                     >
-                      <Camera size={16} />
-                      <span>{isUploadingBannerImg ? "Uploading..." : at.clickPhoto}</span>
+                      {isUploadingBannerImg ? <Loader2 size={16} className="spin-animation" /> : <Camera size={16} />}
+                      <span>{isUploadingBannerImg ? at.uploading : at.clickPhoto}</span>
                     </button>
 
                     <button
@@ -2272,8 +2498,8 @@ export default function AdminPanel({
                         opacity: isUploadingBannerImg ? 0.7 : 1
                       }}
                     >
-                      <Upload size={16} />
-                      <span>{isUploadingBannerImg ? "Uploading..." : at.fromGallery}</span>
+                      {isUploadingBannerImg ? <Loader2 size={16} className="spin-animation" /> : <Upload size={16} />}
+                      <span>{isUploadingBannerImg ? at.uploading : at.fromGallery}</span>
                     </button>
                   </div>
                 )}
@@ -2289,6 +2515,7 @@ export default function AdminPanel({
                     if (e.target.files && e.target.files[0]) {
                       handleBannerImageFile(e.target.files[0]);
                     }
+                    e.target.value = '';
                   }}
                 />
                 <input
@@ -2300,6 +2527,7 @@ export default function AdminPanel({
                     if (e.target.files && e.target.files[0]) {
                       handleBannerImageFile(e.target.files[0]);
                     }
+                    e.target.value = '';
                   }}
                 />
 
@@ -2307,9 +2535,9 @@ export default function AdminPanel({
                 <input 
                   type="text" 
                   className="form-input" 
-                  value={bannerForm.image} 
+                  value={bannerForm.image.startsWith('data:') ? '' : bannerForm.image} 
                   onChange={(e) => setBannerForm({ ...bannerForm, image: e.target.value })}
-                  placeholder={at.orPasteUrl}
+                  placeholder={bannerForm.image.startsWith('data:') ? "✓ Banner image uploaded (or paste URL)" : at.orPasteUrl}
                   style={{ fontSize: '12px' }}
                 />
               </div>
@@ -2499,10 +2727,25 @@ export default function AdminPanel({
               <div style={{ display: 'flex', gap: '12px', marginTop: '20px' }}>
                 <button
                   type="submit"
+                  disabled={isUploadingBannerImg}
                   className="admin-btn-primary"
-                  style={{ flex: 1, padding: '12px', justifyContent: 'center', fontSize: '14px' }}
+                  style={{ 
+                    flex: 1, 
+                    padding: '12px', 
+                    justifyContent: 'center', 
+                    fontSize: '14px',
+                    opacity: isUploadingBannerImg ? 0.65 : 1,
+                    cursor: isUploadingBannerImg ? 'not-allowed' : 'pointer'
+                  }}
                 >
-                  {at.saveBannerBtn}
+                  {isUploadingBannerImg ? (
+                    <>
+                      <Loader2 size={16} className="spin-animation" style={{ marginRight: '6px' }} />
+                      <span>{at.uploadingImg}</span>
+                    </>
+                  ) : (
+                    at.saveBannerBtn
+                  )}
                 </button>
                 <button
                   type="button"
